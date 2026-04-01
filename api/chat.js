@@ -16,7 +16,7 @@ module.exports = async function handler(req, res) {
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    return res.status(500).json({ error: 'Chave de API não configurada' });
+    return res.status(200).json({ reply: '⚠️ ANTHROPIC_API_KEY não encontrada no Vercel. Vai em Settings → Environment Variables e adiciona a chave.' });
   }
 
   const body = JSON.stringify({
@@ -45,17 +45,25 @@ module.exports = async function handler(req, res) {
       response.on('end', () => {
         try {
           const parsed = JSON.parse(data);
-          const reply = parsed.content?.[0]?.text || 'Não consegui responder agora. Tente de novo!';
+
+          // Se a Anthropic retornou erro, mostra no chat para diagnóstico
+          if (parsed.error) {
+            res.status(200).json({ reply: '⚠️ Erro da API: ' + parsed.error.type + ' — ' + parsed.error.message });
+            resolve();
+            return;
+          }
+
+          const reply = parsed.content?.[0]?.text || 'Resposta vazia da API.';
           res.status(200).json({ reply });
-        } catch {
-          res.status(500).json({ error: 'Erro ao processar resposta' });
+        } catch (e) {
+          res.status(200).json({ reply: '⚠️ Erro ao processar resposta: ' + data.slice(0, 200) });
         }
         resolve();
       });
     });
 
-    request.on('error', () => {
-      res.status(500).json({ error: 'Erro de conexão com a API' });
+    request.on('error', (e) => {
+      res.status(200).json({ reply: '⚠️ Erro de rede: ' + e.message });
       resolve();
     });
 
