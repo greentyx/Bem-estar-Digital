@@ -1,7 +1,9 @@
 // api/chat.js — Vercel Serverless Function
 // A chave da API fica só aqui, no servidor. Nunca vai pro browser.
 
-export default async function handler(req, res) {
+const https = require('https');
+
+module.exports = async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Método não permitido' });
   }
@@ -14,38 +16,50 @@ export default async function handler(req, res) {
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    console.error('ANTHROPIC_API_KEY não configurada');
-    return res.status(500).json({ error: 'Servidor não configurado' });
+    return res.status(500).json({ error: 'Chave de API não configurada' });
   }
 
-  try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+  const body = JSON.stringify({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 600,
+    system: system || '',
+    messages,
+  });
+
+  return new Promise((resolve) => {
+    const options = {
+      hostname: 'api.anthropic.com',
+      path: '/v1/messages',
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': apiKey,
         'anthropic-version': '2023-06-01',
+        'Content-Length': Buffer.byteLength(body),
       },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 600,
-        system: system || '',
-        messages,
-      }),
+    };
+
+    const request = https.request(options, (response) => {
+      let data = '';
+      response.on('data', (chunk) => { data += chunk; });
+      response.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          const reply = parsed.content?.[0]?.text || 'Não consegui responder agora. Tente de novo!';
+          res.status(200).json({ reply });
+        } catch {
+          res.status(500).json({ error: 'Erro ao processar resposta' });
+        }
+        resolve();
+      });
     });
 
-    if (!response.ok) {
-      const err = await response.text();
-      console.error('Erro Anthropic:', err);
-      return res.status(response.status).json({ error: 'Erro ao chamar a API' });
-    }
+    request.on('error', () => {
+      res.status(500).json({ error: 'Erro de conexão com a API' });
+      resolve();
+    });
 
-    const data = await response.json();
-    const reply = data.content?.[0]?.text ?? 'Não consegui responder agora. Tente de novo!';
-    return res.status(200).json({ reply });
-
-  } catch (err) {
-    console.error('Erro interno:', err);
-    return res.status(500).json({ error: 'Erro interno do servidor' });
-  }
-}
+    request.write(body);
+    request.end();
+  });
+};
