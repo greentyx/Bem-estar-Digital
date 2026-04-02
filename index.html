@@ -307,6 +307,32 @@
     .send-btn:hover:not(:disabled) { background: #333; transform: scale(1.05); }
     .send-btn:disabled { opacity: 0.3; }
  
+    /* ─── formatação das mensagens ─── */
+    .bubble p {
+      margin: 0 0 8px 0;
+    }
+    .bubble p:last-child { margin-bottom: 0; }
+
+    .bubble .msg-tip {
+      margin: 6px 0;
+      padding: 8px 12px;
+      border-radius: 10px;
+      background: rgba(0,0,0,0.05);
+      border-left: 3px solid var(--gray-mid);
+      line-height: 1.6;
+    }
+    .bubble .msg-tip:last-child { margin-bottom: 0; }
+
+    [data-theme="dark"] .bubble.ai .msg-tip {
+      background: rgba(255,255,255,0.06);
+      border-left-color: var(--gray-mid);
+    }
+
+    .bubble strong {
+      font-weight: 600;
+      color: var(--black);
+    }
+
     /* ─── animations ─── */
     @keyframes fadeUp {
       from { opacity: 0; transform: translateY(12px); }
@@ -528,6 +554,36 @@ Regras:
       document.body.classList.remove('in-chat');
     }
  
+    function formatText(text) {
+      // Escapa HTML básico
+      let t = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+      // Blocos: linha que começa com "**Título**:" vira um parágrafo destacado
+      // Trata cada parágrafo separado por linha em branco
+      const paras = t.split(/\n{2,}/);
+
+      const rendered = paras.map(para => {
+        const lines = para.split('\n').map(line => {
+          // Negrito **texto**
+          line = line.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+          // Itálico *texto*
+          line = line.replace(/\*(.+?)\*/g, '<em>$1</em>');
+          return line;
+        });
+
+        const joined = lines.join('<br>');
+
+        // Se o parágrafo começa com <strong>Algo</strong>: — vira destaque
+        if (/^<strong>.+?<\/strong>:/.test(joined)) {
+          return `<div class="msg-tip">${joined}</div>`;
+        }
+
+        return `<p>${joined}</p>`;
+      });
+
+      return rendered.join('');
+    }
+
     function appendBubble(role, text) {
       const msgs = document.getElementById('messages');
       const row  = document.createElement('div');
@@ -541,7 +597,7 @@ Regras:
  
       const b = document.createElement('div');
       b.className = `bubble ${role}`;
-      b.innerHTML = text.replace(/\n/g, '<br>');
+      b.innerHTML = formatText(text);
       row.appendChild(b);
       msgs.appendChild(row);
       msgs.scrollTop = msgs.scrollHeight;
@@ -607,4 +663,3 @@ Regras:
   </script>
 </body>
 </html>
- 
