@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Sinus — Pixels & Emoções</title>
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=Outfit:wght@300;400;500&display=swap" rel="stylesheet" />
+  <link rel="shortcut icon" href="sinus.png" type="image/x-icon">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -390,7 +391,7 @@ Regras:
     let history = [];
     let loading  = false;
 
-    const FIRST_MSG = 'Oi! Eu sou o Sinus ◐  Tô aqui pra te ajudar a entender como você se sente quando usa redes sociais — sem julgamento nenhum.\n\nPor onde você quer começar?';
+    const FIRST_MSG = 'Oi! Eu sou o Sinus 🐙.  Tô aqui pra te ajudar a entender como você se sente quando usa redes sociais, sem julgamento nenhum.\n\nPor onde você quer começar?';
 
     function startChat() {
       document.body.classList.add('in-chat');
@@ -411,7 +412,7 @@ Regras:
 
       if (role === 'ai') {
         const av = document.createElement('div');
-        av.className = 'msg-avatar'; av.textContent = '◐';
+        av.className = 'msg-avatar'; av.textContent = '';
         row.appendChild(av);
       }
 
@@ -429,7 +430,7 @@ Regras:
       const row  = document.createElement('div');
       row.className = 'msg-row ai'; row.id = 'typing-row';
       const av = document.createElement('div');
-      av.className = 'msg-avatar'; av.textContent = '◐';
+      av.className = 'msg-avatar'; av.textContent = '';
       row.appendChild(av);
       const b = document.createElement('div');
       b.className = 'bubble ai typing-bubble';
