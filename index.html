@@ -803,17 +803,33 @@
  
     let history = [];
     let loading  = false;
+
+    // ── Memória em runtime (carregada do Firebase no startChat) ──
+    let _userProfile   = null;   // users/{uid}/profile/main
+    let _recentLogs    = [];     // users/{uid}/logs/daily/{date} — últimos 7 dias
+    let _memoryContext = null;   // users/{uid}/memory/context
  
     const FIRST_MSG = 'Oi! Eu sou o Sinus 🐙.  Tô aqui pra te ajudar a entender como você se sente quando usa redes sociais, sem julgamento nenhum.\n\nPor onde você quer começar?';
  
     async function startChat() {
       document.body.classList.add('in-chat');
-      // Tenta carregar histórico do Firestore, fallback para localStorage
-      const fbHist = await fbLoadHistory();
+
+      // ── Carrega memória do Firebase em paralelo ──
+      const [fbHist, fbReg, fbProfile, fbLogs, fbMemCtx] = await Promise.all([
+        fbLoadHistory(),
+        fbLoadRegistros(),
+        fbLoadProfile(),
+        fbLoadRecentLogs(),
+        fbLoadMemoryContext(),
+      ]);
+
+      _userProfile   = fbProfile  || null;
+      _recentLogs    = fbLogs     || [];
+      _memoryContext = fbMemCtx   || null;
+
       history = fbHist || JSON.parse(localStorage.getItem('sinus_history') || 'null') || [];
 
-      // Tenta carregar registros do Firestore
-      const fbReg = await fbLoadRegistros();
+      // Sincroniza registros legados
       if (fbReg) localStorage.setItem('sinus_registros', JSON.stringify(fbReg));
 
       const msgs = document.getElementById('messages');
@@ -954,10 +970,21 @@
       showTyping();
  
       try {
+        // Monta padrões detectados para enviar como contexto
+        const patterns = buildPatterns(_recentLogs);
+
         const res = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messages: history })
+          body: JSON.stringify({
+            messages: history,
+            context: {
+              profile:    _userProfile,
+              recentLogs: _recentLogs,
+              patterns:   patterns,
+              userName:   _currentUser?.displayName || null,
+            }
+          })
         });
         const data = await res.json();
         const reply = data.reply || 'Hmm, não consegui responder agora. Tenta de novo mais tarde!';
@@ -967,6 +994,11 @@
         history.push({ role: 'assistant', content: reply });
         localStorage.setItem('sinus_history', JSON.stringify(history));
         fbSaveHistory(history);
+
+        // ── Processa dados extraídos pela IA ──
+        if (data.extracted) {
+          await processExtracted(data.extracted);
+        }
       } catch {
         removeTyping();
         appendBubble('ai', 'Ops, tive um probleminha de conexão 🌐 Tenta de novo!');
@@ -1135,16 +1167,27 @@
       else { saveRegistro(); }
     }
     function saveRegistro() {
+      const today = new Date().toISOString().slice(0, 10);
       const entry = {
-        date: new Date().toISOString().slice(0, 10),
+        date: today,
         before: regData.before, screen: regData.screen,
         sleep: regData.sleep,   after: regData.after
       };
       let registros = JSON.parse(localStorage.getItem('sinus_registros') || '[]');
-      registros = registros.filter(r => r.date !== entry.date);
+      registros = registros.filter(r => r.date !== today);
       registros.push(entry);
       localStorage.setItem('sinus_registros', JSON.stringify(registros));
       fbSaveRegistros(registros);
+
+      // ── Salva também na nova estrutura de logs diários ──
+      fbSaveDailyLog({
+        date:        today,
+        mood_before: entry.before,
+        mood_after:  entry.after,
+        sleep_hours: entry.sleep === '5-' ? 4.5 : entry.sleep === '5-6' ? 5.5
+          : entry.sleep === '6-7' ? 6.5 : entry.sleep === '7-8' ? 7.5 : 8.5,
+        screen_time: entry.screen,
+      });
       markCheckinDone();
       closeRegistro();
       const diff = entry.after - entry.before;
@@ -1231,16 +1274,23 @@
       if (e.target === this) closeRelatorio();
     });
 
-    /* ══════════════════════════════════════════
-       FIREBASE — SALVAR / CARREGAR HISTÓRICO
-    ══════════════════════════════════════════ */
+    /* ══════════════════════════════════════════════════════════════
+       FIREBASE — SISTEMA DE MEMÓRIA REAL
+       Estrutura:
+         users/{uid}                     → histórico de chat (legado)
+         users/{uid}/profile/main        → perfil persistente
+         users/{uid}/logs/daily/{date}   → registro diário
+         users/{uid}/memory/context      → padrões e contexto recente
+    ══════════════════════════════════════════════════════════════ */
+
+    // ── Histórico de chat (compatibilidade) ──
     async function fbSaveHistory(hist) {
       if (!_currentUser) return;
       try {
-        await _db.collection('users').doc(_currentUser.uid).set({ history: hist, updatedAt: Date.now() }, { merge: true });
-      } catch(e) { /* silently fail, localStorage is backup */ }
+        await _db.collection('users').doc(_currentUser.uid)
+          .set({ history: hist, updatedAt: Date.now() }, { merge: true });
+      } catch(e) {}
     }
-
     async function fbLoadHistory() {
       if (!_currentUser) return null;
       try {
@@ -1250,10 +1300,12 @@
       return null;
     }
 
+    // ── Registros legados (modal de registro guiado) ──
     async function fbSaveRegistros(registros) {
       if (!_currentUser) return;
       try {
-        await _db.collection('users').doc(_currentUser.uid).set({ registros, updatedAt: Date.now() }, { merge: true });
+        await _db.collection('users').doc(_currentUser.uid)
+          .set({ registros, updatedAt: Date.now() }, { merge: true });
       } catch(e) {}
     }
 
@@ -1264,6 +1316,174 @@
         if (doc.exists && doc.data().registros) return doc.data().registros;
       } catch(e) {}
       return null;
+    }
+
+    // ── Perfil persistente ──
+    async function fbLoadProfile() {
+      if (!_currentUser) return null;
+      try {
+        const doc = await _db.collection('users').doc(_currentUser.uid)
+          .collection('profile').doc('main').get();
+        return doc.exists ? doc.data() : null;
+      } catch(e) { return null; }
+    }
+    async function fbSaveProfile(updates) {
+      if (!_currentUser) return;
+      try {
+        await _db.collection('users').doc(_currentUser.uid)
+          .collection('profile').doc('main')
+          .set(updates, { merge: true });
+        _userProfile = { ...(_userProfile || {}), ...updates };
+      } catch(e) {}
+    }
+
+    // ── Logs diários ──
+    async function fbLoadRecentLogs() {
+      if (!_currentUser) return [];
+      try {
+        // Carrega os últimos 7 dias
+        const snap = await _db.collection('users').doc(_currentUser.uid)
+          .collection('logs').doc('daily')
+          .collection('entries')
+          .orderBy('date', 'desc').limit(7).get();
+        return snap.docs.map(d => d.data()).reverse();
+      } catch(e) { return []; }
+    }
+    async function fbSaveDailyLog(entry) {
+      if (!_currentUser) return;
+      try {
+        const date = entry.date || new Date().toISOString().slice(0, 10);
+        await _db.collection('users').doc(_currentUser.uid)
+          .collection('logs').doc('daily')
+          .collection('entries').doc(date)
+          .set({ ...entry, date }, { merge: true });
+        // Atualiza cache local
+        const idx = _recentLogs.findIndex(l => l.date === date);
+        if (idx >= 0) _recentLogs[idx] = { ..._recentLogs[idx], ...entry };
+        else _recentLogs.push({ ...entry, date });
+      } catch(e) {}
+    }
+
+    // ── Contexto de memória ──
+    async function fbLoadMemoryContext() {
+      if (!_currentUser) return null;
+      try {
+        const doc = await _db.collection('users').doc(_currentUser.uid)
+          .collection('memory').doc('context').get();
+        return doc.exists ? doc.data() : null;
+      } catch(e) { return null; }
+    }
+    async function fbSaveMemoryContext(updates) {
+      if (!_currentUser) return;
+      try {
+        await _db.collection('users').doc(_currentUser.uid)
+          .collection('memory').doc('context')
+          .set(updates, { merge: true });
+        _memoryContext = { ...(_memoryContext || {}), ...updates };
+      } catch(e) {}
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // PIPELINE DE MEMÓRIA — processExtracted + buildPatterns
+    // ══════════════════════════════════════════════════════════════
+
+    async function processExtracted(ex) {
+      if (!ex) return;
+      const today = new Date().toISOString().slice(0, 10);
+
+      // 1. Salva log diário se houver dados de humor/sono/energia
+      const hasLogData = ex.mood_before != null || ex.mood_after != null
+        || ex.sleep_hours != null || ex.energy != null || ex.usage_time_min != null;
+
+      if (hasLogData) {
+        const logEntry = {
+          date:            today,
+          mood_before:     ex.mood_before     ?? null,
+          mood_after:      ex.mood_after      ?? null,
+          energy:          ex.energy          ?? null,
+          sleep_hours:     ex.sleep_hours     ?? null,
+          screen_time:     ex.usage_time_min != null
+            ? Math.round(ex.usage_time_min) + ' min' : null,
+          social_network:  ex.social_network  ?? null,
+          emotional_state: ex.emotional_state ?? null,
+        };
+        await fbSaveDailyLog(logEntry);
+      }
+
+      // 2. Atualiza perfil com novas redes sociais ou hábitos
+      const profileUpdates = {};
+      if (ex.social_network) {
+        const nets = (_userProfile?.networks || []);
+        if (!nets.includes(ex.social_network)) {
+          profileUpdates.networks = [...nets, ex.social_network];
+        }
+      }
+      if (ex.habits && ex.habits.length > 0) {
+        const current = _userProfile?.goals || [];
+        const merged  = [...new Set([...current, ...ex.habits])];
+        profileUpdates.goals = merged;
+      }
+      if (Object.keys(profileUpdates).length > 0) {
+        await fbSaveProfile(profileUpdates);
+      }
+
+      // 3. Atualiza contexto de memória (últimos tópicos)
+      const lastTopics = _memoryContext?.last_topics || [];
+      if (ex.intent && ex.intent !== 'FORA_TEMA') {
+        const topic = [ex.intent, ex.social_network, ex.emotional_state]
+          .filter(Boolean).join(':');
+        const updated = [topic, ...lastTopics].slice(0, 10);
+        await fbSaveMemoryContext({ last_topics: updated, updatedAt: Date.now() });
+      }
+
+      // 4. Atualiza padrão de humor no perfil
+      if (ex.emotional_state) {
+        const negStates = ['LEVE_QUEDA', 'NEGATIVO', 'ALERTA'];
+        const currentPattern = _userProfile?.mood_pattern;
+        const recentNeg = _recentLogs
+          .slice(-5)
+          .filter(l => l.emotional_state && negStates.includes(l.emotional_state)).length;
+        const newPattern = recentNeg >= 3 ? 'oscillating'
+          : ex.emotional_state === 'POSITIVO' ? 'stable' : currentPattern || 'unknown';
+        if (newPattern !== currentPattern) {
+          await fbSaveProfile({ mood_pattern: newPattern });
+        }
+      }
+    }
+
+    // Detecta padrões reais nos logs (mín. 3 ocorrências)
+    function buildPatterns(logs) {
+      if (!logs || logs.length < 3) return [];
+      const patterns = [];
+
+      // Padrão: humor piora depois de usar redes
+      const worseAfter = logs.filter(l =>
+        l.mood_before != null && l.mood_after != null && l.mood_after < l.mood_before
+      );
+      if (worseAfter.length >= 3)
+        patterns.push(`Humor piora após uso das redes em ${worseAfter.length} dos últimos ${logs.length} dias`);
+
+      // Padrão: sono curto recorrente
+      const shortSleep = logs.filter(l => l.sleep_hours != null && l.sleep_hours < 7);
+      if (shortSleep.length >= 3)
+        patterns.push(`Sono abaixo de 7h em ${shortSleep.length} registros recentes`);
+
+      // Padrão: tempo de tela alto
+      const highScreen = logs.filter(l => {
+        if (!l.screen_time) return false;
+        const mins = parseInt(l.screen_time);
+        return !isNaN(mins) && mins > 120;
+      });
+      if (highScreen.length >= 3)
+        patterns.push(`Uso de tela acima de 2h em ${highScreen.length} dos últimos ${logs.length} dias`);
+
+      // Padrão: estado emocional negativo recorrente
+      const negStates = ['LEVE_QUEDA', 'NEGATIVO', 'ALERTA'];
+      const negCount = logs.filter(l => l.emotional_state && negStates.includes(l.emotional_state)).length;
+      if (negCount >= 3)
+        patterns.push(`Estado emocional negativo/queda em ${negCount} registros recentes`);
+
+      return patterns;
     }
 
     function doLogout() {
